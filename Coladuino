@@ -1,9 +1,79 @@
-# 🚀 Coladuino Compiler 🛠️: Mobilny Kompilator ESP32/ESP8266 na Google Colab
+# --- COLADUINO COMPILER UPLOAD SCRIPT V1.0 ---
+# Importowanie niezbędnych bibliotek
+!pip install PyGithub --quiet
+from github import Github
+from google.colab import drive, files
+from google.colab import output
+import base64
+import os
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1E4L4P6yUq0NXcGfZTEIGmJziBqVl_I93?authuser=2#scrollTo=gktBTUp4jKAQ)
+# -------------------------------------------------------------
+# KONFIGURACJA GITHUB
+# -------------------------------------------------------------
+REPO_NAME = "Kosior3x/Coladuino-Compiler-ESP-Arduino"
+BRANCH_NAME = "main"  # Upewnij się, że to jest właściwa nazwa gałęzi (często 'main')
+SOURCE_FILE_PATH = "firmware.bin" # Nazwa skompilowanego pliku BIN (lokalnie w Colab)
+TARGET_GITHUB_PATH = "compiled_firmwares/firmware.bin" # Ścieżka w repozytorium GitHub
+COMMIT_MESSAGE = "Automatyczna kompilacja Coladuino i upload pliku BIN."
+# -------------------------------------------------------------
 
-**Coladuino Compiler** to innowacyjne narzędzie...
+# Wyświetlenie okna modalnego do bezpiecznego wklejenia tokenu
+print("--- 🔑 Autoryzacja GitHub ---")
+print("Wklej swój osobisty Token Dostępu GitHub (musi mieć uprawnienie 'repo').")
+github_token = input("Wklej token: ")
+output.clear() # Czyści poprzednie linie, aby token nie został w historii
 
-***
+if not github_token:
+    print("❌ Token nie został wklejony. Wgranie pliku niemożliwe.")
+else:
+    if not os.path.exists(SOURCE_FILE_PATH):
+        print(f"❌ Błąd: Nie znaleziono skompilowanego pliku BIN pod ścieżką '{SOURCE_FILE_PATH}'. Upewnij się, że kompilacja się powiodła.")
+    else:
+        try:
+            g = Github(github_token)
+            repo = g.get_repo(REPO_NAME)
+            
+            # Wczytanie zawartości pliku w trybie binarnym
+            with open(SOURCE_FILE_PATH, 'rb') as file:
+                content_bytes = file.read()
+            
+            # Kodowanie treści do Base64, ponieważ GitHub API wymaga Base64
+            content_b64 = base64.b64encode(content_bytes).decode('utf-8')
+            
+            print(f"\n✅ Połączenie z repozytorium {REPO_NAME} nawiązane.")
 
-## 1. Instrukcja Użytkowania Notatnika (Colab) 💻
+            # Sprawdzenie, czy plik już istnieje (aby go zaktualizować)
+            try:
+                # Pobranie istniejącego pliku, aby uzyskać jego SHA (wymagane do aktualizacji)
+                file_data = repo.get_contents(TARGET_GITHUB_PATH, ref=BRANCH_NAME)
+                
+                # Aktualizacja istniejącego pliku
+                repo.update_file(
+                    TARGET_GITHUB_PATH, 
+                    COMMIT_MESSAGE, 
+                    content_b64, 
+                    file_data.sha, 
+                    branch=BRANCH_NAME
+                )
+                print(f"🔄 ZAKTUALIZOWANO plik: {TARGET_GITHUB_PATH}")
+
+            except Exception as e:
+                # Jeśli plik nie istnieje (Błąd 404), utwórz nowy
+                if "404" in str(e):
+                    repo.create_file(
+                        TARGET_GITHUB_PATH, 
+                        COMMIT_MESSAGE, 
+                        content_b64, 
+                        branch=BRANCH_NAME
+                    )
+                    print(f"🆕 UTWORZONO nowy plik: {TARGET_GITHUB_PATH}")
+                else:
+                     raise # Wyrzucenie innego błędu
+
+            print(f"--- GOTOWE ---")
+            print(f"Sprawdź zmiany tutaj: https://github.com/{REPO_NAME}/blob/{BRANCH_NAME}/{TARGET_GITHUB_PATH}")
+            print(f"Commit: {COMMIT_MESSAGE}")
+
+        except Exception as e:
+            print(f"\n❌ Krytyczny Błąd podczas operacji GitHub: {e}")
+            print("Sprawdź, czy TOKEN jest poprawny i czy ma uprawnienie 'repo'.")
