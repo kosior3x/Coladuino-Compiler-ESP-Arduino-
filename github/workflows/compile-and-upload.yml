@@ -1,0 +1,72 @@
+name: Build and upload ESP firmware
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+        with:
+          version: latest
+
+      - name: Install required cores
+        run: |
+          # List of FQBNs to build for. Edit this list to match your target boards.
+          BOARDS=("esp32:esp32:esp32" "esp8266:esp8266:nodemcu")
+          for fqbn in "${BOARDS[@]}"; do
+            core=$(echo "$fqbn" | awk -F: '{print $1 ":" $2}')
+            echo "Installing core: $core"
+            arduino-cli core update-index
+            arduino-cli core install "$core"
+          done
+
+      - name: Compile for all boards and collect binaries
+        run: |
+          mkdir -p compiled_firmwares
+          BOARDS=("esp32:esp32:esp32" "esp8266:esp8266:nodemcu")
+          for fqbn in "${BOARDS[@]}"; do
+            echo "Compiling for $fqbn"
+            arduino-cli compile --fqbn "$fqbn" --output-dir build .
+            BIN=$(find build -type f -name '*.bin' | tail -n1)
+            if [ -z "$BIN" ]; then
+              echo "No .bin found for $fqbn"
+              ls -R build
+              exit 1
+            fi
+            target="compiled_firmwares/firmware-$(echo $fqbn | tr ':' '-')-${GITHUB_SHA}.bin"
+            cp "$BIN" "$target"
+            echo "Saved $target"
+            rm -rf build/*
+          done
+
+      - name: Commit compiled firmwares back to the repository
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add compiled_firmwares || true
+          git commit -m "Auto-build: add compiled firmware for commit ${GITHUB_SHA}" || echo "No changes to commit"
+          git push origin HEAD:${{ github.ref_name }} || echo "Push failed"
+
+      - name: Upload artifacts (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-firmwares
+          path: compiled_firmwares/
+
+      - name: Show compiled files
+        run: ls -la compiled_firmwares || true
