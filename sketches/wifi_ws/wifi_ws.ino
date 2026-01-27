@@ -66,7 +66,7 @@ Preferences preferences;
 #define STEP_DELAY_MAX_US 3000  // Min speed
 
 #define MAX_DISTANCE_CM 400
-#define SOUND_SPEED 0.0343
+#define SOUND_SPEED 0.0343f
 
 // Battery
 #define BATT_FULL_V 8.4
@@ -274,8 +274,8 @@ float readDistance(int trigPin, int echoPin) {
   long duration = pulseIn(echoPin, HIGH, 30000);
   if (duration == 0) return MAX_DISTANCE_CM;
 
-  float distance = duration * SOUND_SPEED / 2.0;
-  return min(distance, (float)MAX_DISTANCE_CM);
+  float distance = (float)duration * SOUND_SPEED / 2.0f;
+  return fminf(distance, (float)MAX_DISTANCE_CM);
 }
 
 void readAllSensors() {
