@@ -12,7 +12,7 @@
  * - No WiFi networks = USB Serial mode (fallback)
  *
  * BIBLIOTEKI:
- * - ArduinoJson 7.x
+ * - ArduinoJson 6.x (wymagana wersja 6.x dla StaticJsonDocument)
  * - WebSockets 2.x
  */
 
@@ -140,6 +140,8 @@ bool emergencyStop = false;
 
 // USB Serial mode
 bool usbMode = false;
+unsigned long lastHeartbeat = 0;
+#define WATCHDOG_TIMEOUT 2000 // Stop if no message for 2s
 
 // ============================================
 // SETUP
@@ -148,6 +150,7 @@ bool usbMode = false;
 void setup() {
   Serial.begin(115200);
   delay(500);
+  lastHeartbeat = millis();
 
   Serial.println("\n========================================");
   Serial.println("SWARM ESP32 - UNIFIED 3 MODES v4.0");
@@ -595,6 +598,7 @@ void processCommand(String json) {
   }
 
   String type = doc["type"].as<String>();
+  lastHeartbeat = millis(); // Refresh watchdog on any valid JSON
 
   if (type == "command") {
     String action = doc["action"].as<String>();
@@ -605,6 +609,12 @@ void processCommand(String json) {
     emergencyStop = false;
 
     Serial.printf("[CMD] %s (L=%d, R=%d)\n", action.c_str(), speedL, speedR);
+
+    // Send ACK
+    StaticJsonDocument<100> ack;
+    ack["type"] = "ack";
+    ack["action"] = action;
+    sendJSON(ack);
 
     if (action == "STOP") {
       stopMotors();
@@ -657,11 +667,19 @@ void checkObstacles() {
 // MAIN LOOP
 // ============================================
 
+void checkWatchdog() {
+  if (currentAction != "STOP" && millis() - lastHeartbeat > WATCHDOG_TIMEOUT) {
+    stopMotors();
+    Serial.println("WATCHDOG: Connection lost, motors stopped.");
+  }
+}
+
 void loop() {
   // WebSocket loop (only if not USB mode)
   if (!usbMode) {
     webSocket.loop();
   }
+  checkWatchdog();
 
   unsigned long currentMillis = millis();
 
