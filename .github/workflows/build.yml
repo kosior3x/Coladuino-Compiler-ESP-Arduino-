@@ -1,0 +1,62 @@
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-esp32:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget git ca-certificates curl unzip python3 python3-pip jq
+
+      - name: Install Arduino CLI
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+          sudo mv bin/arduino-cli /usr/local/bin/arduino-cli
+          arduino-cli version
+
+      - name: Prepare Arduino CLI config
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli core update-index
+
+      - name: Install esp32 core and libraries
+        run: |
+          arduino-cli core install esp32:esp32
+          arduino-cli lib install "ArduinoJson" || true
+          arduino-cli lib install "WebSockets" || true
+
+      - name: Show available boards (debug)
+        run: arduino-cli board listall
+
+      - name: Compile serial-binary sketch for DOIT ESP32 DevKit V1
+        run: |
+          mkdir -p build/serial_binary
+          arduino-cli compile --fqbn esp32:esp32:esp32doit-devkit-v1 --build-path build/serial_binary --export-binaries sketches/serial_binary
+
+      - name: Compile wifi-websocket sketch for DOIT ESP32 DevKit V1
+        run: |
+          mkdir -p build/wifi_ws
+          arduino-cli compile --fqbn esp32:esp32:esp32doit-devkit-v1 --build-path build/wifi_ws --export-binaries sketches/wifi_ws
+
+      - name: List build artifacts
+        run: |
+          echo "=== serial_binary build ==="
+          ls -la build/serial_binary || true
+          echo "=== wifi_ws build ==="
+          ls -la build/wifi_ws || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-firmwares
+          path: |
+            build/serial_binary/**
+            build/wifi_ws/**
