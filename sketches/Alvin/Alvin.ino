@@ -1,13 +1,48 @@
+/**
+ * SWARM ESP32 Tricycle Robot - UNIFIED 3 MODES
+ *
+ * COMMUNICATION MODES:
+ * 1. WiFi Access Point (default)
+ * 2. WiFi Client (connects to router)
+ * 3. USB Serial (for Android OTG)
+ *
+ * MODE SELECTION (at startup):
+ * - Hold button on GPIO 0 = WiFi Client mode
+ * - Normal boot = WiFi AP mode
+ * - No WiFi networks = USB Serial mode (fallback)
+ *
+ * BIBLIOTEKI:
+ * - ArduinoJson 7.x
+ * - WebSockets 2.x
+ */
+
 #include <WiFi.h>
-#include <WiFiClient.h>
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
 
 // ============================================
+// MODE SELECTION
+// ============================================
+
+enum CommMode {
+  MODE_AP,        // Access Point
+  MODE_CLIENT,    // WiFi Client
+  MODE_USB        // USB Serial only
+};
+
+CommMode currentMode = MODE_AP;
+
+// ============================================
 // WIFI CONFIGURATION
 // ============================================
 
+// AP Mode
+#define AP_SSID "SWARM_ROBOT"
+#define AP_PASSWORD "swarm2026"
+#define AP_CHANNEL 6
+
+// Client Mode (saved networks)
 #define MAX_NETWORKS 5
 struct WiFiNetwork {
   char ssid[32];
@@ -17,37 +52,44 @@ struct WiFiNetwork {
 WiFiNetwork savedNetworks[MAX_NETWORKS] = {
   {"OPPO", "11111111"},
   {"Redmi", "11111111"},
-  {"SWARM_HOTSPOT", "swarm2026"},
+  {"", ""},
   {"", ""},
   {"", ""}
 };
 
+// AP IP
+IPAddress ap_local_IP(192, 168, 4, 1);
+IPAddress ap_gateway(192, 168, 4, 1);
+IPAddress ap_subnet(255, 255, 255, 0);
+
+// WebSocket server
 WebSocketsServer webSocket = WebSocketsServer(81);
 Preferences preferences;
 
 // ============================================
-// PIN DEFINITIONS
+// PINS
 // ============================================
 
-// HC-SR04 Sensors
+// Mode selection button
+#define MODE_BUTTON 0  // BOOT button on DevKit
+
+// Sensors
 #define TRIG_LEFT 12
 #define ECHO_LEFT 14
 #define TRIG_RIGHT 27
 #define ECHO_RIGHT 26
 
-// Stepper LEFT (28BYJ-48)
+// Steppers
 #define STEP_L_IN1 19
 #define STEP_L_IN2 21
 #define STEP_L_IN3 22
 #define STEP_L_IN4 23
 
-// Stepper RIGHT (28BYJ-48)
 #define STEP_R_IN1 16
 #define STEP_R_IN2 17
 #define STEP_R_IN3 5
 #define STEP_R_IN4 18
 
-// Battery
 #define BATTERY_ADC 34
 
 // ============================================
@@ -55,20 +97,15 @@ Preferences preferences;
 // ============================================
 
 #define WHEEL_DIAMETER_MM 65.0
-#define WHEEL_CIRCUMFERENCE_MM (WHEEL_DIAMETER_MM * PI)
-#define WHEEL_BASE_MM 120.0
-
 #define STEPS_PER_REV 2048
-#define STEPS_PER_MM (STEPS_PER_REV / WHEEL_CIRCUMFERENCE_MM)
+#define STEPS_PER_MM (STEPS_PER_REV / (WHEEL_DIAMETER_MM * PI))
 
-// Prędkość bazowa (mikrosekund/krok)
-#define STEP_DELAY_MIN_US 800   // Max speed
-#define STEP_DELAY_MAX_US 3000  // Min speed
+#define STEP_DELAY_MIN_US 800
+#define STEP_DELAY_MAX_US 3000
 
 #define MAX_DISTANCE_CM 400
 #define SOUND_SPEED 0.0343f
 
-// Battery
 #define BATT_FULL_V 8.4
 #define BATT_CRITICAL_V 6.4
 #define ADC_DIVIDER_RATIO 2.0
@@ -80,14 +117,8 @@ Preferences preferences;
 // ============================================
 
 const int STEP_SEQ[8][4] = {
-  {1, 0, 0, 0},
-  {1, 1, 0, 0},
-  {0, 1, 0, 0},
-  {0, 1, 1, 0},
-  {0, 0, 1, 0},
-  {0, 0, 1, 1},
-  {0, 0, 0, 1},
-  {1, 0, 0, 1}
+  {1,0,0,0}, {1,1,0,0}, {0,1,0,0}, {0,1,1,0},
+  {0,0,1,0}, {0,0,1,1}, {0,0,0,1}, {1,0,0,1}
 };
 
 // ============================================
@@ -101,17 +132,14 @@ int batteryPercent = 0;
 
 int stepPosL = 0, stepPosR = 0;
 String currentAction = "STOP";
+int currentSpeedL = 0, currentSpeedR = 0;
 
-// Current motor speeds (0-150 range from Python)
-int currentSpeedL = 0;
-int currentSpeedR = 0;
-
-bool wifiConnected = false;
 bool wsConnected = false;
 uint8_t wsClientNum = 0;
-
-// Emergency stop flag
 bool emergencyStop = false;
+
+// USB Serial mode
+bool usbMode = false;
 
 // ============================================
 // SETUP
@@ -119,24 +147,46 @@ bool emergencyStop = false;
 
 void setup() {
   Serial.begin(115200);
-  delay(100);
+  delay(500);
 
   Serial.println("\n========================================");
-  Serial.println("SWARM ESP32 WiFi Robot v2.1 FIXED");
+  Serial.println("SWARM ESP32 - UNIFIED 3 MODES v4.0");
   Serial.println("========================================");
 
-  loadSettings();
+  pinMode(MODE_BUTTON, INPUT_PULLUP);
+
   initPins();
   stopMotors();
   readBattery();
-  connectWiFi();
 
-  webSocket.begin();
-  webSocket.onEvent(onWebSocketEvent);
+  // Detect mode
+  currentMode = detectMode();
+
+  // Start communication based on mode
+  switch (currentMode) {
+    case MODE_AP:
+      Serial.println("\n[MODE] Access Point");
+      startAccessPoint();
+      webSocket.begin();
+      webSocket.onEvent(onWebSocketEvent);
+      break;
+
+    case MODE_CLIENT:
+      Serial.println("\n[MODE] WiFi Client");
+      loadSettings();
+      connectWiFiClient();
+      webSocket.begin();
+      webSocket.onEvent(onWebSocketEvent);
+      break;
+
+    case MODE_USB:
+      Serial.println("\n[MODE] USB Serial");
+      usbMode = true;
+      break;
+  }
 
   Serial.println("========================================");
-  Serial.println("READY - Waiting for connection");
-  Serial.println("Port: 81 (WebSocket)");
+  Serial.println("READY");
   Serial.println("========================================");
 
   sendStatus();
@@ -164,7 +214,64 @@ void initPins() {
 }
 
 // ============================================
-// WIFI
+// MODE DETECTION
+// ============================================
+
+CommMode detectMode() {
+  // Check if BOOT button pressed during startup
+  if (digitalRead(MODE_BUTTON) == LOW) {
+    Serial.println("BOOT button pressed - WiFi Client mode");
+    delay(1000);
+    return MODE_CLIENT;
+  }
+
+  // Try AP mode first
+  Serial.println("Auto-detecting mode...");
+
+  // Check if any WiFi networks saved
+  preferences.begin("swarm", true);
+  String ssid0 = preferences.getString("ssid0", "");
+  preferences.end();
+
+  if (ssid0.length() > 0) {
+    Serial.println("Saved networks found - trying Client mode");
+    return MODE_CLIENT;
+  }
+
+  // Default: AP mode
+  Serial.println("No saved networks - using AP mode");
+  return MODE_AP;
+}
+
+// ============================================
+// WIFI ACCESS POINT
+// ============================================
+
+void startAccessPoint() {
+  if (!WiFi.softAPConfig(ap_local_IP, ap_gateway, ap_subnet)) {
+    Serial.println("AP Config Failed!");
+    return;
+  }
+
+  bool success = WiFi.softAP(AP_SSID, AP_PASSWORD, AP_CHANNEL, false, 4);
+
+  if (success) {
+    IPAddress ip = WiFi.softAPIP();
+    Serial.println("========================================");
+    Serial.println("*** ACCESS POINT ACTIVE ***");
+    Serial.printf("SSID:     %s\n", AP_SSID);
+    Serial.printf("Password: %s\n", AP_PASSWORD);
+    Serial.printf("IP:       %s\n", ip.toString().c_str());
+    Serial.println("========================================");
+  } else {
+    Serial.println("AP Start Failed - falling back to USB mode");
+    currentMode = MODE_USB;
+    usbMode = true;
+  }
+}
+
+// ============================================
+// WIFI CLIENT
 // ============================================
 
 void loadSettings() {
@@ -186,7 +293,7 @@ void loadSettings() {
   preferences.end();
 }
 
-void connectWiFi() {
+void connectWiFiClient() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
   delay(100);
@@ -211,7 +318,6 @@ void connectWiFi() {
         }
 
         if (WiFi.status() == WL_CONNECTED) {
-          wifiConnected = true;
           Serial.printf("\n*** CONNECTED! IP: %s ***\n",
                        WiFi.localIP().toString().c_str());
           return;
@@ -220,8 +326,9 @@ void connectWiFi() {
     }
   }
 
-  Serial.println("\nNo WiFi - Serial mode");
-  wifiConnected = false;
+  Serial.println("\nWiFi connection failed - falling back to USB mode");
+  currentMode = MODE_USB;
+  usbMode = true;
 }
 
 // ============================================
@@ -249,13 +356,7 @@ void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t *payload, size_t lengt
       break;
 
     case WStype_TEXT:
-      {
-        String msg = String((char*)payload);
-        processCommand(msg);
-      }
-      break;
-
-    default:
+      processCommand(String((char*)payload));
       break;
   }
 }
@@ -274,8 +375,7 @@ float readDistance(int trigPin, int echoPin) {
   long duration = pulseIn(echoPin, HIGH, 30000);
   if (duration == 0) return MAX_DISTANCE_CM;
 
-  float distance = (float)duration * SOUND_SPEED / 2.0f;
-  return fminf(distance, (float)MAX_DISTANCE_CM);
+  return fminf((float)duration * SOUND_SPEED / 2.0f, (float)MAX_DISTANCE_CM);
 }
 
 void readAllSensors() {
@@ -297,23 +397,25 @@ void readBattery() {
 }
 
 // ============================================
-// JSON COMMUNICATION - FIXED PROTOCOL
+// JSON COMMUNICATION
 // ============================================
 
 void sendJSON(JsonDocument& doc) {
   String json;
   serializeJson(doc, json);
 
-  if (wsConnected) {
+  // Send via WebSocket (if connected)
+  if (wsConnected && !usbMode) {
     webSocket.sendTXT(wsClientNum, json);
   }
+
+  // Always send via Serial (for USB mode and debugging)
   Serial.println(json);
 }
 
 void sendSensorData() {
   StaticJsonDocument<300> doc;
 
-  // FIXED: Format zgodny z Python
   doc["type"] = "sensors";
   doc["dist_left"] = round(distLeft * 10) / 10.0;
   doc["dist_right"] = round(distRight * 10) / 10.0;
@@ -330,10 +432,29 @@ void sendSensorData() {
 void sendStatus() {
   StaticJsonDocument<300> doc;
   doc["type"] = "status";
-  doc["ip"] = wifiConnected ? WiFi.localIP().toString() : "offline";
-  doc["wifi"] = wifiConnected;
+
+  switch (currentMode) {
+    case MODE_AP:
+      doc["mode"] = "AP";
+      doc["ssid"] = AP_SSID;
+      doc["ip"] = WiFi.softAPIP().toString();
+      break;
+
+    case MODE_CLIENT:
+      doc["mode"] = "CLIENT";
+      doc["ssid"] = WiFi.SSID();
+      doc["ip"] = WiFi.localIP().toString();
+      break;
+
+    case MODE_USB:
+      doc["mode"] = "USB";
+      doc["ip"] = "serial";
+      break;
+  }
+
   doc["battery_v"] = round(batteryVoltage * 100) / 100.0;
   doc["uptime"] = millis() / 1000;
+
   sendJSON(doc);
 }
 
@@ -348,7 +469,7 @@ void sendAlert(const char* message) {
 }
 
 // ============================================
-// STEPPER CONTROL - FIXED WITH SPEED
+// STEPPER CONTROL
 // ============================================
 
 void setStepperL(int step) {
@@ -386,20 +507,15 @@ void stopMotors() {
   emergencyStop = false;
 }
 
-// FIXED: Mapowanie prędkości 0-150 na delay
 int speedToDelay(int speed) {
-  // speed: 0-150
-  // delay: 3000us (wolno) - 800us (szybko)
   speed = constrain(abs(speed), 0, 150);
   return map(speed, 0, 150, STEP_DELAY_MAX_US, STEP_DELAY_MIN_US);
 }
 
-// FIXED: Różnicowa kontrola prędkości
 void executeDifferentialDrive(int speedL, int speedR, int durationMs) {
   currentSpeedL = speedL;
   currentSpeedR = speedR;
 
-  // Sprawdź czy STOP
   if (speedL == 0 && speedR == 0) {
     stopMotors();
     return;
@@ -418,23 +534,20 @@ void executeDifferentialDrive(int speedL, int speedR, int durationMs) {
   while (millis() - startTime < durationMs) {
     unsigned long now = micros();
 
-    // Step left motor
     if (speedL != 0 && now - lastStepL >= delayL) {
       stepPosL += dirL;
       setStepperL(stepPosL);
       lastStepL = now;
     }
 
-    // Step right motor (reversed direction)
     if (speedR != 0 && now - lastStepR >= delayR) {
       stepPosR -= dirR;
       setStepperR(stepPosR);
       lastStepR = now;
     }
 
-    // Safety checks every 50ms
     if ((millis() - startTime) % 50 == 0) {
-      webSocket.loop();
+      if (!usbMode) webSocket.loop();
       readAllSensors();
 
       if (distLeft < 5.0 || distRight < 5.0) {
@@ -445,7 +558,6 @@ void executeDifferentialDrive(int speedL, int speedR, int durationMs) {
       }
     }
 
-    // Check emergency flag
     if (emergencyStop) {
       stopMotors();
       return;
@@ -454,12 +566,11 @@ void executeDifferentialDrive(int speedL, int speedR, int durationMs) {
     delayMicroseconds(100);
   }
 
-  // Po zakończeniu - utrzymaj pozycję
   disableSteppers();
 }
 
 // ============================================
-// COMMAND PROCESSING - FIXED
+// COMMAND PROCESSING
 // ============================================
 
 void processCommand(String json) {
@@ -471,10 +582,9 @@ void processCommand(String json) {
     return;
   }
 
-  // FIXED: Obsługa ping/pong
+  // Ping/Pong
   if (doc.containsKey("cmd")) {
     String cmd = doc["cmd"].as<String>();
-
     if (cmd == "ping") {
       StaticJsonDocument<100> resp;
       resp["cmd"] = "pong";
@@ -486,11 +596,8 @@ void processCommand(String json) {
 
   String type = doc["type"].as<String>();
 
-  // FIXED: Nowy protokół z speed_left/speed_right
   if (type == "command") {
     String action = doc["action"].as<String>();
-
-    // FIXED: Pobierz prędkości z JSON
     int speedL = doc["speed_left"] | 100;
     int speedR = doc["speed_right"] | 100;
 
@@ -499,56 +606,24 @@ void processCommand(String json) {
 
     Serial.printf("[CMD] %s (L=%d, R=%d)\n", action.c_str(), speedL, speedR);
 
-    // FIXED: Obsługa wszystkich akcji z Python
     if (action == "STOP") {
       stopMotors();
-
     } else if (action == "FORWARD") {
       executeDifferentialDrive(speedL, speedR, 500);
-
     } else if (action == "TURN_LEFT") {
-      // Lewe koło wolniej, prawe szybciej
       executeDifferentialDrive(speedL, speedR, 300);
-
     } else if (action == "TURN_RIGHT") {
-      // Prawe koło wolniej, lewe szybciej
       executeDifferentialDrive(speedL, speedR, 300);
-
     } else if (action == "ESCAPE") {
-      // Ruch do tyłu + obrót
       executeDifferentialDrive(-speedL, speedR, 400);
-
-    } else if (action.startsWith("DANGER") || action.startsWith("WARNING")) {
-      // Krótki ruch z podanymi prędkościami
-      executeDifferentialDrive(speedL, speedR, 200);
-
-    } else if (action.startsWith("CHAOS")) {
-      // Chaos actions - krótki czas wykonania
-      executeDifferentialDrive(speedL, speedR, 300);
-
-    } else if (action.startsWith("SEEK") || action.startsWith("ACTIVE")) {
-      // Space seeking - normalny czas
-      executeDifferentialDrive(speedL, speedR, 400);
-
-    } else if (action.startsWith("CORRIDOR") || action.startsWith("DRIFT")) {
-      // Korekta kursu - krótki ruch
-      executeDifferentialDrive(speedL, speedR, 250);
-
-    } else if (action.startsWith("CRITICAL")) {
-      // Reakcja krytyczna - natychmiastowa
-      executeDifferentialDrive(speedL, speedR, 200);
-
     } else {
-      // Default dla nieznanych - krótki test
       executeDifferentialDrive(speedL, speedR, 300);
     }
 
-    // Po wykonaniu akcji wyślij status
     sendSensorData();
 
   } else if (type == "get_status") {
     sendStatus();
-
   } else if (type == "emergency_stop") {
     emergencyStop = true;
     stopMotors();
@@ -569,7 +644,6 @@ void checkBattery() {
 }
 
 void checkObstacles() {
-  // Krytyczna odległość: 5cm
   if ((distLeft < 5.0 || distRight < 5.0) &&
       currentAction != "STOP" &&
       currentSpeedL != 0 && currentSpeedR != 0) {
@@ -584,11 +658,14 @@ void checkObstacles() {
 // ============================================
 
 void loop() {
-  webSocket.loop();
+  // WebSocket loop (only if not USB mode)
+  if (!usbMode) {
+    webSocket.loop();
+  }
 
   unsigned long currentMillis = millis();
 
-  // Czytaj sensory co 100ms
+  // Read sensors
   if (currentMillis - lastSensorRead >= 100) {
     readAllSensors();
     lastSensorRead = currentMillis;
@@ -602,13 +679,13 @@ void loop() {
 
     checkObstacles();
 
-    // Wyślij dane tylko jeśli połączony
-    if (wsConnected) {
+    // Send sensors (WebSocket or Serial)
+    if (wsConnected || usbMode) {
       sendSensorData();
     }
   }
 
-  // Serial commands
+  // Serial commands (works in all modes)
   if (Serial.available()) {
     String line = Serial.readStringUntil('\n');
     line.trim();
