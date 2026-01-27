@@ -112,6 +112,8 @@ uint8_t wsClientNum = 0;
 
 // Emergency stop flag
 bool emergencyStop = false;
+unsigned long lastHeartbeat = 0;
+#define WATCHDOG_TIMEOUT 2000
 
 // ============================================
 // SETUP
@@ -120,6 +122,7 @@ bool emergencyStop = false;
 void setup() {
   Serial.begin(115200);
   delay(100);
+  lastHeartbeat = millis();
 
   Serial.println("\n========================================");
   Serial.println("SWARM ESP32 WiFi Robot v2.1 FIXED");
@@ -485,6 +488,7 @@ void processCommand(String json) {
   }
 
   String type = doc["type"].as<String>();
+  lastHeartbeat = millis();
 
   // FIXED: Nowy protokół z speed_left/speed_right
   if (type == "command") {
@@ -498,6 +502,12 @@ void processCommand(String json) {
     emergencyStop = false;
 
     Serial.printf("[CMD] %s (L=%d, R=%d)\n", action.c_str(), speedL, speedR);
+
+    // Send ACK
+    StaticJsonDocument<100> ack;
+    ack["type"] = "ack";
+    ack["action"] = action;
+    sendJSON(ack);
 
     // FIXED: Obsługa wszystkich akcji z Python
     if (action == "STOP") {
@@ -583,8 +593,16 @@ void checkObstacles() {
 // MAIN LOOP
 // ============================================
 
+void checkWatchdog() {
+  if (currentAction != "STOP" && millis() - lastHeartbeat > WATCHDOG_TIMEOUT) {
+    stopMotors();
+    Serial.println("WATCHDOG: Connection lost");
+  }
+}
+
 void loop() {
   webSocket.loop();
+  checkWatchdog();
 
   unsigned long currentMillis = millis();
 
