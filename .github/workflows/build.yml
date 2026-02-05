@@ -46,6 +46,19 @@ jobs:
           for sketch in sketches/*/; do
             if [ -d "$sketch" ]; then
               sketch_name=$(basename "$sketch")
+
+              # Ensure there is an .ino file matching the folder name (Arduino requirement)
+              if [ ! -f "$sketch/$sketch_name.ino" ]; then
+                first_ino=$(find "$sketch" -maxdepth 1 -name "*.ino" | head -n 1)
+                if [ -n "$first_ino" ]; then
+                  echo "Fixing naming: Renaming $first_ino to $sketch/$sketch_name.ino"
+                  mv "$first_ino" "$sketch/$sketch_name.ino"
+                else
+                  echo "No .ino file found in $sketch, skipping."
+                  continue
+                fi
+              fi
+
               echo "=== Compiling $sketch_name ==="
               mkdir -p "build_output/$sketch_name"
               arduino-cli compile --fqbn esp32:esp32:esp32doit-devkit-v1 --output-dir "build_output/$sketch_name" "$sketch"
